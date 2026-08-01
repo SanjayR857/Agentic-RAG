@@ -1,6 +1,8 @@
 import streamlit as st
 import time
 from backend.app.agent.workflow import app
+from backend.app.core.config import settings
+from backend.app.services.langcache_service import langcache_service
 
 # Set page config
 st.set_page_config(
@@ -54,7 +56,6 @@ with st.sidebar:
     - **Fallback:** Live DuckDuckGo Web Search
     """)
     st.info("Ask about recruitment policies to trigger RAG, or general knowledge to trigger Web Search routing.")
-
 # Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -86,56 +87,70 @@ if prompt := st.chat_input("Enter your question here..."):
         
         with st.status("Agent thinking and executing nodes...", expanded=True) as status_box:
             try:
-                # Execute graph stream
-                inputs = {
-                    "user_query": prompt,
-                    "documents": [],
-                    "web_search_needed": False,
-                    "web_search_queries": [],
-                    "generation": "",
-                    "web_search_count": 0
-                }
-                
-                for event in app.stream(inputs, config={"configurable": {"thread_id": "st-session"}}):
-                    for node_name, state in event.items():
-                        st.write(f"⚙️ **Executed Node:** `{node_name}`")
-                        steps.append(f"⚙️ **Executed Node:** `{node_name}`")
-                        
-                        if node_name == "retrieve_rag":
-                            docs = state.get("documents", [])
-                            st.info(f"📚 Retrieved {len(docs)} documents from Pinecone index.")
-                            steps.append(f"📚 Retrieved {len(docs)} documents.")
-                            with st.expander("Retrieved Document Context Snippets", expanded=False):
-                                for idx, doc in enumerate(docs):
-                                    text = doc.get("text", "") or doc.get("metadata", {}).get("text", "")
-                                    score = doc.get("rerank_score", 0.0)
-                                    st.markdown(f"**Doc {idx+1} (Rerank Score: {score:.4f}):**\n{text[:250]}...")
+                # Check semantic cache first
+                cached_response = langcache_service.search_cache(prompt)
+                if cached_response:
+                    st.write("⚡ **Fast-path:** Semantic cache hit!")
+                    steps.append("⚡ Retrieved answer from LangCache (semantic match).")
+                    final_answer = cached_response
+                    status_box.update(label="Retrieved from cache!", state="complete", expanded=False)
+                else:
+                    # Execute graph stream
+                    inputs = {
+                        "user_query": prompt,
+                        "documents": [],
+                        "web_search_needed": False,
+                        "web_search_queries": [],
+                        "generation": "",
+                        "web_search_count": 0
+                    }
+                    
+                    for event in app.stream(inputs, config={"configurable": {"thread_id": "st-session"}}):
+                        for node_name, state in event.items():
+                            st.write(f"⚙️ **Executed Node:** `{node_name}`")
+                            steps.append(f"⚙️ **Executed Node:** `{node_name}`")
+                            
+                            if node_name == "retrieve_rag":
+                                docs = state.get("documents", [])
+                                st.info(f"📚 Retrieved {len(docs)} documents from Pinecone index.")
+                                steps.append(f"📚 Retrieved {len(docs)} documents.")
+                                with st.expander("Retrieved Document Context Snippets", expanded=False):
+                                    for idx, doc in enumerate(docs):
+                                        text = doc.get("text", "") or doc.get("metadata", {}).get("text", "")
+                                        score = doc.get("rerank_score", 0.0)
+                                        st.markdown(f"**Doc {idx+1} (Rerank Score: {score:.4f}):**\n{text[:250]}...")
+                                        
+                            elif node_name == "grade_documents":
+                                web_search_needed = state.get("web_search_needed", False)
+                                relevant_count = len(state.get("documents", []))
+                                if web_search_needed:
+                                    st.warning("⚠️ All retrieved documents graded as IRRELEVANT. Triggering web search.")
+                                    steps.append("⚠️ CRAG Graded all documents as irrelevant.")
+                                else:
+                                    st.success(f"✅ Found {relevant_count} relevant documents. Ready to generate.")
+                                    steps.append(f"✅ CRAG Graded {relevant_count} documents as relevant.")
                                     
-                        elif node_name == "grade_documents":
-                            web_search_needed = state.get("web_search_needed", False)
-                            relevant_count = len(state.get("documents", []))
-                            if web_search_needed:
-                                st.warning("⚠️ All retrieved documents graded as IRRELEVANT. Triggering web search.")
-                                steps.append("⚠️ CRAG Graded all documents as irrelevant.")
-                            else:
-                                st.success(f"✅ Found {relevant_count} relevant documents. Ready to generate.")
-                                steps.append(f"✅ CRAG Graded {relevant_count} documents as relevant.")
+                            elif node_name == "web_search":
+                                search_count = state.get("web_search_count", 0)
+                                docs = state.get("documents", [])
+                                st.info(f"🌐 Querying DuckDuckGo (Retries: {search_count}/3).")
+                                steps.append(f"🌐 Queried DuckDuckGo web search. Total documents in context: {len(docs)}.")
                                 
-                        elif node_name == "web_search":
-                            search_count = state.get("web_search_count", 0)
-                            docs = state.get("documents", [])
-                            st.info(f"🌐 Querying DuckDuckGo (Retries: {search_count}/3).")
-                            steps.append(f"🌐 Queried DuckDuckGo web search. Total documents in context: {len(docs)}.")
-                            
-                        elif node_name == "generate":
-                            final_answer = state.get("generation", "")
-                            steps.append("🤖 Generated candidate answer using Ollama.")
-                            
-                            # Let's show the evaluation logs since generate node output routes next
-                            # (Wait a split second to make the UI transition smooth)
-                            time.sleep(0.5)
-                            
-                status_box.update(label="Workflow completed successfully!", state="complete", expanded=False)
+                            elif node_name == "generate":
+                                final_answer = state.get("generation", "")
+                                steps.append("🤖 Generated candidate answer using Ollama.")
+                                
+                                # Let's show the evaluation logs since generate node output routes next
+                                # (Wait a split second to make the UI transition smooth)
+                                time.sleep(0.5)
+                    
+                    if final_answer:
+                        saved = langcache_service.save_to_cache(prompt, final_answer)
+                        if saved:
+                            steps.append("💾 Saved answer to LangCache.")
+                        else:
+                            steps.append("⚠️ Failed to save answer to LangCache (Check terminal for errors).")
+                    status_box.update(label="Workflow completed successfully!", state="complete", expanded=False)
                 
             except Exception as e:
                 status_box.update(label="Execution failed!", state="error")

@@ -9,6 +9,9 @@ backend_dir = current_dir.parent.parent
 env_file_path = backend_dir / ".env"
 
 class Settings(BaseSettings):
+    # App Auth Settings
+    APP_API_KEY: str = Field(default="rag-admin-secure-key", description="Application API Key required to authenticate client requests")
+
     # Pinecone configurations
     PINECONE_API_KEY: str = Field(..., description="Pinecone service API key")
     PINECONE_INDEX_NAME: str = Field(default="agentic-rag-index", description="Name of Pinecone Index")
@@ -35,6 +38,11 @@ class Settings(BaseSettings):
 
     # Agent workflow constraints
     MAX_WEB_SEARCH_RETRIES: int = Field(default=2, description="Maximum loop count for web search fallbacks")
+
+    # LangCache Settings
+    LANGCACHE_API_KEY: str = Field(..., description="LangCache API Key")
+    LANGCACHE_SERVER_URL: str = Field(..., description="LangCache Server URL")
+    LANGCACHE_CACHE_ID: str = Field(..., description="LangCache Cache ID")
 
     # Configuration for Settings loading
     model_config = SettingsConfigDict(
